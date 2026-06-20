@@ -1,6 +1,7 @@
 use crosswalk_cel::{
-    compile_expr, evaluate_cel_expression_with_input, evaluate_compiled_expression_with_input,
-    preview_cel_expression_with_input, SecurityLimits, StandaloneEvalError,
+    compile_expr, evaluate_cel_expression, evaluate_cel_expression_with_input,
+    evaluate_compiled_expression_with_input, evaluate_compiled_expression_with_input_and_limits,
+    preview_cel_expression_with_input, ExpressionPhase, SecurityLimits, StandaloneEvalError,
     StandaloneExpressionInput,
 };
 use crosswalk_functions::codes::CodeSystemRegistry;
@@ -159,4 +160,89 @@ fn invalid_binding_names_are_rejected_for_evaluate_and_preview() {
     assert!(preview.issues[0]
         .message
         .contains("invalid root binding name `bad-name`"));
+}
+
+// F1 (CPU-DoS): inputs are bounded by `max_output_json_bytes` before compile/execute, so a crafted
+// comprehension cannot iterate over an unboundedly large input list.
+#[test]
+fn oversized_input_is_rejected_by_evaluate_cel_expression() {
+    // A small symmetric input cap; the `source` value below serializes well past it.
+    let limits = SecurityLimits {
+        max_output_json_bytes: 64,
+        ..SecurityLimits::default()
+    };
+    let big_source = json!({ "blob": "x".repeat(4096) });
+
+    let result = evaluate_cel_expression("source.blob", big_source, json!({}), &limits, codes());
+
+    match result {
+        Err(StandaloneEvalError::Evaluate { message, .. }) => {
+            assert!(
+                message.contains("input exceeds max"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected oversized-input rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn small_input_still_evaluates_with_small_cap() {
+    let limits = SecurityLimits {
+        max_output_json_bytes: 128,
+        ..SecurityLimits::default()
+    };
+    // Tiny source/ctx stay well under the 128-byte cap.
+    let result = evaluate_cel_expression(
+        r#"source.name + "!""#,
+        json!({ "name": "ok" }),
+        json!({}),
+        &limits,
+        codes(),
+    )
+    .unwrap();
+    assert_eq!(result, json!("ok!"));
+}
+
+#[test]
+fn oversized_input_is_rejected_by_compiled_evaluation() {
+    let limits = SecurityLimits {
+        max_output_json_bytes: 64,
+        ..SecurityLimits::default()
+    };
+    let compiled = compile_expr("source.blob", &limits, "test.expression".into()).unwrap();
+    let result = evaluate_compiled_expression_with_input_and_limits(
+        &compiled,
+        input([("source", json!({ "blob": "x".repeat(4096) }))]),
+        &limits,
+        codes(),
+    );
+
+    match result {
+        Err(StandaloneEvalError::Evaluate { message, .. }) => {
+            assert!(
+                message.contains("input exceeds max"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected oversized-input rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn oversized_input_is_rejected_by_preview() {
+    let limits = SecurityLimits {
+        max_output_json_bytes: 64,
+        ..SecurityLimits::default()
+    };
+    let preview = preview_cel_expression_with_input(
+        "source.blob",
+        input([("source", json!({ "blob": "x".repeat(4096) }))]),
+        &limits,
+        codes(),
+    );
+
+    assert!(!preview.is_ok());
+    assert_eq!(preview.issues[0].phase, ExpressionPhase::Limits);
+    assert!(preview.issues[0].message.contains("input exceeds max"));
 }

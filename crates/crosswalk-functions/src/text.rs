@@ -1,6 +1,8 @@
 use crate::FunctionError;
 use unicode_normalization::UnicodeNormalization;
 
+const MAX_REGEX_PATTERN_BYTES: usize = 4096;
+
 pub fn trim(input: &str) -> String {
     input.trim().to_string()
 }
@@ -55,6 +57,12 @@ pub fn regex_replace(
     pattern: &str,
     replacement: &str,
 ) -> Result<String, FunctionError> {
+    if pattern.len() > MAX_REGEX_PATTERN_BYTES {
+        return Err(FunctionError::new(
+            "REGEX_PATTERN_TOO_LONG",
+            format!("regex pattern exceeds max {MAX_REGEX_PATTERN_BYTES} bytes"),
+        ));
+    }
     let re = regex::Regex::new(pattern)
         .map_err(|err| FunctionError::new("REGEX_INVALID_PATTERN", err.to_string()))?;
     Ok(re.replace_all(input, replacement).to_string())
@@ -65,6 +73,12 @@ pub fn regex_extract(
     pattern: &str,
     group: usize,
 ) -> Result<Option<String>, FunctionError> {
+    if pattern.len() > MAX_REGEX_PATTERN_BYTES {
+        return Err(FunctionError::new(
+            "REGEX_PATTERN_TOO_LONG",
+            format!("regex pattern exceeds max {MAX_REGEX_PATTERN_BYTES} bytes"),
+        ));
+    }
     let re = regex::Regex::new(pattern)
         .map_err(|err| FunctionError::new("REGEX_INVALID_PATTERN", err.to_string()))?;
     Ok(re.captures(input).and_then(|captures| {
@@ -98,5 +112,35 @@ mod tests {
     fn regex_errors_have_stable_codes() {
         let err = regex_replace("x", "[", "").unwrap_err();
         assert_eq!(err.code, "REGEX_INVALID_PATTERN");
+    }
+
+    #[test]
+    fn regex_replace_pattern_too_long_returns_err() {
+        let long_pattern = "a".repeat(MAX_REGEX_PATTERN_BYTES + 1);
+        let err = regex_replace("hello", &long_pattern, "").unwrap_err();
+        assert_eq!(err.code, "REGEX_PATTERN_TOO_LONG");
+    }
+
+    #[test]
+    fn regex_replace_short_pattern_still_works() {
+        assert_eq!(
+            regex_replace("hello world", r"\s+", "-").unwrap(),
+            "hello-world"
+        );
+    }
+
+    #[test]
+    fn regex_extract_pattern_too_long_returns_err() {
+        let long_pattern = "b".repeat(MAX_REGEX_PATTERN_BYTES + 1);
+        let err = regex_extract("hello", &long_pattern, 0).unwrap_err();
+        assert_eq!(err.code, "REGEX_PATTERN_TOO_LONG");
+    }
+
+    #[test]
+    fn regex_extract_short_pattern_still_works() {
+        assert_eq!(
+            regex_extract("hello 42 world", r"\d+", 0).unwrap(),
+            Some("42".to_string())
+        );
     }
 }

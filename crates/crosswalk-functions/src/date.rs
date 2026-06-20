@@ -120,7 +120,11 @@ pub fn add_months(input: &str, months: i64) -> Result<String, FunctionError> {
 
 pub fn start_of_month(input: &str) -> Result<String, FunctionError> {
     let date = parse_iso_date(input, "DATE_PARSE")?;
-    Ok(date.with_day(1).unwrap().format("%Y-%m-%d").to_string())
+    Ok(date
+        .with_day(1)
+        .ok_or_else(|| FunctionError::new("DATE_OVERFLOW", "overflow"))?
+        .format("%Y-%m-%d")
+        .to_string())
 }
 
 pub fn end_of_month(input: &str) -> Result<String, FunctionError> {
@@ -130,10 +134,11 @@ pub fn end_of_month(input: &str) -> Result<String, FunctionError> {
     } else {
         (date.year(), date.month() + 1)
     };
-    let first_next = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+    let first_next = NaiveDate::from_ymd_opt(year, month, 1)
+        .ok_or_else(|| FunctionError::new("DATE_OVERFLOW", "overflow"))?;
     Ok(first_next
         .pred_opt()
-        .unwrap()
+        .ok_or_else(|| FunctionError::new("DATE_OVERFLOW", "overflow"))?
         .format("%Y-%m-%d")
         .to_string())
 }
@@ -209,5 +214,20 @@ mod tests {
         assert_eq!(days_between("2024-01-01", "2024-01-03").unwrap(), 2);
         assert_eq!(start_of_month("2024-02-15").unwrap(), "2024-02-01");
         assert_eq!(end_of_month("2024-02-15").unwrap(), "2024-02-29");
+    }
+
+    #[test]
+    fn end_of_month_extreme_year_returns_err_not_panic() {
+        // "262143-12-15" is an extreme 6-digit year; even if parse rejects it, the
+        // function must return Err (not panic). Previously the two .unwrap() calls in
+        // the body would abort/unwind if NaiveDate construction failed; now they are
+        // converted to DATE_OVERFLOW errors via ok_or_else.
+        let result = end_of_month("262143-12-15");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn start_of_month_normal_date_unchanged() {
+        assert_eq!(start_of_month("2024-02-15").unwrap(), "2024-02-01");
     }
 }

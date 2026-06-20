@@ -23,6 +23,23 @@ fn err_fn(name: &str, m: impl ToString) -> ExecutionError {
     ExecutionError::function_error(name, m)
 }
 
+/// Maximum allowed byte length for a user-supplied regex pattern.
+/// Patterns longer than this are rejected before compilation to bound
+/// worst-case regex-compile time and memory use.
+const MAX_REGEX_PATTERN_BYTES: usize = 4096;
+
+/// Compile a regex pattern, returning an [`ExecutionError`] if the pattern
+/// exceeds [`MAX_REGEX_PATTERN_BYTES`] or is syntactically invalid.
+fn compile_regex(pattern: &str, fn_name: &str) -> Result<Regex, ExecutionError> {
+    if pattern.len() > MAX_REGEX_PATTERN_BYTES {
+        return Err(err_fn(
+            fn_name,
+            format!("regex pattern exceeds max {MAX_REGEX_PATTERN_BYTES} bytes"),
+        ));
+    }
+    Regex::new(pattern).map_err(|e| err_fn(fn_name, e))
+}
+
 fn arity_error(name: &str, expected: usize, got: usize) -> ExecutionError {
     err_fn(
         name,
@@ -411,7 +428,7 @@ pub fn register_stdlib(ctx: &mut Context, codes: Arc<FunctionRegistry>) {
             }
             let s = str_from(&args[0])?;
             let p = str_from(&args[1])?;
-            let re = Regex::new(&p).map_err(|e| err_fn("text_matches", e))?;
+            let re = compile_regex(&p, "text_matches")?;
             Ok(re.is_match(&s))
         },
     );
@@ -1624,7 +1641,7 @@ pub fn register_stdlib(ctx: &mut Context, codes: Arc<FunctionRegistry>) {
         |v: Value, pat: Value| -> Result<bool, ExecutionError> {
             let s = str_from(&v)?;
             if !matches!(pat, Value::Null) && !is_missing(&pat) {
-                let re = Regex::new(&str_from(&pat)?).map_err(|e| err_fn("id_is_valid", e))?;
+                let re = compile_regex(&str_from(&pat)?, "id_is_valid")?;
                 return Ok(re.is_match(&s));
             }
             Ok(!s.is_empty())
@@ -1940,7 +1957,7 @@ pub fn register_stdlib(ctx: &mut Context, codes: Arc<FunctionRegistry>) {
         "validate_matches",
         |v: Value, pat: Value, msg: Value| -> Result<bool, ExecutionError> {
             let s = str_from(&v)?;
-            let re = Regex::new(&str_from(&pat)?).map_err(|e| err_fn("validate_matches", e))?;
+            let re = compile_regex(&str_from(&pat)?, "validate_matches")?;
             if !re.is_match(&s) {
                 let m = if matches!(msg, Value::Null) || is_missing(&msg) {
                     "pattern mismatch".into()
@@ -2123,11 +2140,32 @@ fn list_ref(v: &Value) -> Result<&[Value], ExecutionError> {
     }
 }
 
+/// Iterative depth-first flatten (left-to-right order).
+///
+/// Replaces the former recursive implementation to avoid stack overflows on
+/// deeply-nested lists.  The output order is identical to what the recursive
+/// version produced: items are visited depth-first, left-to-right.
+///
+/// Implementation: use an explicit work stack of `Value` items, seeded with
+/// the input slice in *reverse* order so that `pop()` always yields the next
+/// item in the original left-to-right sequence.  When a `List` is popped, its
+/// children are pushed in reverse order so they too are processed in order.
 fn flatten_rec(items: &[Value], out: &mut Vec<Value>) {
-    for x in items {
-        match x {
-            Value::List(inner) => flatten_rec(inner.as_ref(), out),
-            _ => out.push(x.clone()),
+    // Pre-size the stack to the length of the top-level slice.
+    let mut stack: Vec<Value> = Vec::with_capacity(items.len());
+    // Push in reverse so the first element is at the top of the stack.
+    for item in items.iter().rev() {
+        stack.push(item.clone());
+    }
+    while let Some(val) = stack.pop() {
+        match val {
+            Value::List(inner) => {
+                // Push children in reverse so left-to-right order is preserved.
+                for item in inner.iter().rev() {
+                    stack.push(item.clone());
+                }
+            }
+            other => out.push(other),
         }
     }
 }
@@ -2397,4 +2435,111 @@ pub fn helper_metadata() -> Vec<HelperMetadata> {
     .into_iter()
     .map(|(name, arity)| HelperMetadata { name, arity })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // Helper: build a Value::List from a Vec<Value>.
+    fn list(items: Vec<Value>) -> Value {
+        Value::List(Arc::new(items))
+    }
+
+    fn int(n: i64) -> Value {
+        Value::Int(n)
+    }
+
+    // --- F5: flatten_rec tests ---
+
+    /// Verify that the iterative flatten produces the same depth-first
+    /// left-to-right order as the original recursive version.
+    #[test]
+    fn test_flatten_rec_order_preservation() {
+        // Input: [1, [2, [3, 4], 5], 6]
+        // Expected output: [1, 2, 3, 4, 5, 6]
+        let input = vec![
+            int(1),
+            list(vec![int(2), list(vec![int(3), int(4)]), int(5)]),
+            int(6),
+        ];
+        let mut out = Vec::new();
+        flatten_rec(&input, &mut out);
+        let expected: Vec<Value> = (1..=6).map(int).collect();
+        assert_eq!(
+            out, expected,
+            "flatten_rec should produce depth-first left-to-right order"
+        );
+    }
+
+    /// Verify that a deeply-nested list (~5000 levels) does NOT overflow the
+    /// stack.  This would have caused a stack overflow with the old recursive
+    /// implementation.
+    #[test]
+    fn test_flatten_rec_deep_no_stack_overflow() {
+        // Build a left-nested list 5000 levels deep.
+        // The deepest value is 1, and each nesting wraps it: [[[[...1...]]]]
+        // Flat output should be [1].
+        const DEPTH: usize = 5_000;
+        let mut v: Value = int(42);
+        for _ in 0..DEPTH {
+            v = list(vec![v]);
+        }
+        let mut out = Vec::new();
+        flatten_rec(&[v], &mut out);
+        assert_eq!(out, vec![int(42)], "deep flatten should yield [42]");
+    }
+
+    // --- F6: compile_regex tests ---
+
+    #[test]
+    fn test_compile_regex_valid_pattern_succeeds() {
+        let re = compile_regex(r"^\d{4}-\d{2}-\d{2}$", "test_fn");
+        assert!(
+            re.is_ok(),
+            "a valid short pattern should compile successfully"
+        );
+        let re = re.unwrap();
+        assert!(re.is_match("2024-01-15"));
+        assert!(!re.is_match("not-a-date"));
+    }
+
+    #[test]
+    fn test_compile_regex_pattern_too_long_returns_error() {
+        // Build a pattern that exceeds MAX_REGEX_PATTERN_BYTES.
+        let long_pattern = "a".repeat(MAX_REGEX_PATTERN_BYTES + 1);
+        let result = compile_regex(&long_pattern, "test_fn");
+        assert!(
+            result.is_err(),
+            "a pattern exceeding the byte limit should return an error"
+        );
+        // Verify the error message mentions the limit.
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains(&MAX_REGEX_PATTERN_BYTES.to_string()),
+            "error message should mention the byte limit, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_compile_regex_exactly_at_limit_succeeds() {
+        // A pattern of exactly MAX_REGEX_PATTERN_BYTES bytes should be accepted.
+        let pattern = "a".repeat(MAX_REGEX_PATTERN_BYTES);
+        let result = compile_regex(&pattern, "test_fn");
+        assert!(
+            result.is_ok(),
+            "a pattern of exactly MAX_REGEX_PATTERN_BYTES should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_compile_regex_invalid_pattern_returns_error() {
+        // An invalid regex should produce an error.
+        let result = compile_regex("[unclosed", "test_fn");
+        assert!(
+            result.is_err(),
+            "an invalid regex pattern should return an error"
+        );
+    }
 }

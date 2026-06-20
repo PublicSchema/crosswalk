@@ -12,6 +12,7 @@ use crate::paths::{
     collect_dotted_paths_with_roots, collect_missing_aware_injection_paths_from_compiled,
     filter_paths_by_roots,
 };
+use crate::security::SecurityLimits;
 use serde_json::{Map, Value as JsonValue};
 use std::collections::BTreeMap;
 use std::fmt::Display;
@@ -23,6 +24,15 @@ pub fn evaluate_mapping(
     mapping: &CompiledMapping,
     source: JsonValue,
     ctx: JsonValue,
+) -> crate::runtime::MappingOutput {
+    evaluate_mapping_with_limits(mapping, source, ctx, &SecurityLimits::default())
+}
+
+pub fn evaluate_mapping_with_limits(
+    mapping: &CompiledMapping,
+    source: JsonValue,
+    ctx: JsonValue,
+    limits: &SecurityLimits,
 ) -> crate::runtime::MappingOutput {
     let mut records: BTreeMap<String, Vec<JsonValue>> = BTreeMap::new();
     let mut errors = Vec::new();
@@ -43,6 +53,7 @@ pub fn evaluate_mapping(
             None,
             None,
             None,
+            limits,
             &codes,
         ) {
             Ok(val) if truthy_json(&val) => {}
@@ -91,6 +102,7 @@ pub fn evaluate_mapping(
             &mut errors,
             &mut warnings,
             &paths,
+            limits,
         ) {
             Ok(rows) => {
                 records.insert(rec.name.clone(), rows);
@@ -191,6 +203,7 @@ fn eval_record(
     collected: &mut Vec<MappingError>,
     warnings: &mut Vec<MappingError>,
     all_paths: &[(String, Vec<String>)],
+    limits: &SecurityLimits,
 ) -> Result<Vec<JsonValue>, MappingError> {
     let mut out = Vec::new();
 
@@ -204,6 +217,7 @@ fn eval_record(
             None,
             None,
             None,
+            limits,
             codes,
         ) {
             Ok(v) => v,
@@ -252,6 +266,7 @@ fn eval_record(
                     Some(&aug_json),
                     Some(index as i64),
                     Some(as_name.as_str()),
+                    limits,
                     codes,
                 ) {
                     Ok(v) => v,
@@ -289,6 +304,7 @@ fn eval_record(
                 warnings,
                 Some(index),
                 all_paths,
+                limits,
             )? {
                 out.push(row);
             }
@@ -306,6 +322,7 @@ fn eval_record(
             None,
             None,
             None,
+            limits,
             codes,
         ) {
             Ok(v) => v,
@@ -333,7 +350,7 @@ fn eval_record(
     let aug_json = augment_loop_element(&JsonValue::Null, &row_paths, "item", MISSING_STR);
     if let Some(row) = eval_record_row(
         rec, source, root, ctx, &aug_json, -1, "item", codes, mode, collected, warnings, None,
-        all_paths,
+        all_paths, limits,
     )? {
         out.push(row);
     }
@@ -354,6 +371,7 @@ fn eval_record_row(
     warnings: &mut Vec<MappingError>,
     row_index: Option<usize>,
     all_paths: &[(String, Vec<String>)],
+    limits: &SecurityLimits,
 ) -> Result<Option<JsonValue>, MappingError> {
     let vars_paths = filter_paths_by_roots(all_paths, &["vars"]);
     let mut vars_json = if vars_paths.is_empty() {
@@ -378,6 +396,7 @@ fn eval_record_row(
             Some(item),
             Some(index),
             Some(as_name),
+            limits,
             codes,
         ) {
             Ok(v) => v,
@@ -412,6 +431,7 @@ fn eval_record_row(
             Some(item),
             Some(index),
             Some(as_name),
+            limits,
             codes,
         );
         let (required, on_err, defv) = match &cf.yaml {
@@ -616,6 +636,7 @@ fn eval_compiled_json(
     item: Option<&JsonValue>,
     index: Option<i64>,
     as_name: Option<&str>,
+    limits: &SecurityLimits,
     codes: &Arc<crate::code_system::CodeSystemRegistry>,
 ) -> Result<JsonValue, String> {
     let mut root_bindings = BTreeMap::from([
@@ -635,9 +656,10 @@ fn eval_compiled_json(
     } else {
         root_bindings.insert("item".to_string(), JsonValue::Null);
     }
-    crosswalk_cel::evaluate_compiled_expression_with_input(
+    crosswalk_cel::evaluate_compiled_expression_with_input_and_limits(
         cel,
         StandaloneExpressionInput::new(root_bindings),
+        limits,
         Arc::clone(codes),
     )
     .map_err(|err| err.to_string())
