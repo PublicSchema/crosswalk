@@ -19,6 +19,31 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// Maximum size (in bytes) of an untrusted mapping document accepted for parsing.
+///
+/// F10 (DoS): `serde_yaml`/`serde_json` have no built-in pre-parse byte cap, so
+/// a hostile document could rely on alias expansion or sheer size to exhaust
+/// memory/CPU before any other limit fires. Reject anything larger first.
+const MAX_MAPPING_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Absolute safety cap on a JSON-Pointer array index used during writes.
+///
+/// F3 (DoS): `write_at` pads an array with nulls up to the target index, so a
+/// large attacker-controlled index forces a huge allocation. Compile-time
+/// validation against `limits.max_list_len` is the primary defense; this
+/// constant is a runtime defense-in-depth guard for the path where `limits` is
+/// not reachable (the compiled mapping does not retain `SecurityLimits`). The
+/// value is intentionally generous so legitimate mappings are unaffected.
+const MAX_ARRAY_INDEX: usize = 1_000_000;
+
+/// Maximum number of full transformation-log entries retained per evaluation.
+///
+/// F9 (DoS): in non-Production privacy modes each log entry embeds full
+/// `resolved_input`/`resolved_output` JSON; over many rules this is unbounded
+/// memory. Once this cap is reached we stop retaining further entries (after a
+/// single truncation marker) instead of growing without bound.
+const MAX_LOG_ENTRIES: usize = 10_000;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PublicSchemaBindingMode {
@@ -260,8 +285,16 @@ pub fn compile_publicschema_mapping(
     let mut expression_count = 0usize;
     let mut rules = Vec::with_capacity(doc.property_mappings.len());
     for (idx, pm) in doc.property_mappings.iter().enumerate() {
-        validate_pointer(&pm.source, format!("property_mappings[{idx}].source"))?;
-        validate_pointer(&pm.target, format!("property_mappings[{idx}].target"))?;
+        validate_pointer(
+            &pm.source,
+            format!("property_mappings[{idx}].source"),
+            limits.max_list_len,
+        )?;
+        validate_pointer(
+            &pm.target,
+            format!("property_mappings[{idx}].target"),
+            limits.max_list_len,
+        )?;
         validate_formula_entries(&pm.formula, idx)?;
         validate_value_mappings(&pm.value_mappings, idx)?;
         let to_target = formula_expression(&pm.formula, PublicSchemaDirection::ToTarget)
@@ -575,7 +608,8 @@ pub fn evaluate_publicschema_mapping(
             }
         };
 
-        if let Err(message) = write_pointer(&mut output, write_ptr, value.clone()) {
+        if let Err(message) = write_pointer(&mut output, write_ptr, value.clone(), MAX_ARRAY_INDEX)
+        {
             let err = MappingError::error(
                 ErrorCode::TypeError,
                 message,
@@ -662,6 +696,15 @@ pub fn preview_publicschema_rule_expression(
 }
 
 fn parse_publicschema_document(text: &str) -> Result<PublicSchemaMappingDocument, CompileError> {
+    // F10 (DoS): cap the untrusted document size before parsing. `serde_yaml`
+    // has no pre-parse byte cap, so a hostile document could exploit alias
+    // expansion or sheer size to exhaust memory/CPU before any later limit fires.
+    if text.len() > MAX_MAPPING_DOCUMENT_BYTES {
+        return Err(CompileError::Mapping(format!(
+            "mapping document is {} bytes, exceeds maximum of {MAX_MAPPING_DOCUMENT_BYTES} bytes",
+            text.len()
+        )));
+    }
     let trimmed = text.trim_start();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         serde_json::from_str(text).map_err(|e| CompileError::Mapping(e.to_string()))
@@ -798,14 +841,30 @@ fn code_entry_from_yaml(
     })
 }
 
-fn validate_pointer(pointer: &str, path: String) -> Result<(), CompileError> {
-    if pointer.is_empty() || pointer.starts_with('/') {
-        Ok(())
-    } else {
-        Err(CompileError::Mapping(format!(
-            "{path} must be an RFC 6901 JSON Pointer"
-        )))
+fn validate_pointer(pointer: &str, path: String, max_index: usize) -> Result<(), CompileError> {
+    if pointer.is_empty() {
+        return Ok(());
     }
+    if !pointer.starts_with('/') {
+        return Err(CompileError::Mapping(format!(
+            "{path} must be an RFC 6901 JSON Pointer"
+        )));
+    }
+    // F3 (DoS): reject numeric array-index segments above `max_index` so a
+    // mapping like `/x/100000000` cannot force a huge null-padding allocation
+    // in `write_at` at evaluation time.
+    if let Some(segments) = pointer_segments(pointer) {
+        for seg in &segments {
+            if let Ok(idx) = seg.parse::<usize>() {
+                if idx > max_index {
+                    return Err(CompileError::Mapping(format!(
+                        "{path} array index {idx} exceeds maximum of {max_index}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn formula_expression(
@@ -1063,6 +1122,27 @@ struct LogFields<'a> {
 }
 
 fn push_log(log: &mut Vec<PublicSchemaRuleLogEntry>, fields: LogFields<'_>) {
+    // F9 (DoS): in non-Production privacy modes each entry embeds full
+    // resolved input/output JSON, so the log is otherwise unbounded over many
+    // rules. Once the cap is reached, push a single truncation marker and stop
+    // retaining further entries.
+    if log.len() >= MAX_LOG_ENTRIES {
+        if log.len() == MAX_LOG_ENTRIES {
+            log.push(PublicSchemaRuleLogEntry {
+                index: fields.index,
+                rule_id: None,
+                source_path: fields.source_path.to_string(),
+                target_path: fields.target_path.to_string(),
+                status: "log_truncated".to_string(),
+                expression: None,
+                resolved_input: None,
+                resolved_output: None,
+                quality: None,
+                issues: Vec::new(),
+            });
+        }
+        return;
+    }
     let include_values = !matches!(fields.privacy, PrivacyMode::Production);
     log.push(PublicSchemaRuleLogEntry {
         index: fields.index,
@@ -1100,16 +1180,26 @@ fn read_pointer<'a>(value: &'a JsonValue, pointer: &str) -> Option<&'a JsonValue
     Some(cur)
 }
 
-fn write_pointer(root: &mut JsonValue, pointer: &str, value: JsonValue) -> Result<(), String> {
+fn write_pointer(
+    root: &mut JsonValue,
+    pointer: &str,
+    value: JsonValue,
+    max_index: usize,
+) -> Result<(), String> {
     if pointer.is_empty() {
         *root = value;
         return Ok(());
     }
     let segments = pointer_segments(pointer).ok_or_else(|| "invalid JSON Pointer".to_string())?;
-    write_at(root, &segments, value)
+    write_at(root, &segments, value, max_index)
 }
 
-fn write_at(cur: &mut JsonValue, segments: &[String], value: JsonValue) -> Result<(), String> {
+fn write_at(
+    cur: &mut JsonValue,
+    segments: &[String],
+    value: JsonValue,
+    max_index: usize,
+) -> Result<(), String> {
     if segments.is_empty() {
         *cur = value;
         return Ok(());
@@ -1136,7 +1226,7 @@ fn write_at(cur: &mut JsonValue, segments: &[String], value: JsonValue) -> Resul
                         JsonValue::Object(Map::new())
                     }
                 });
-                write_at(child, rest, value)
+                write_at(child, rest, value, max_index)
             }
         }
         JsonValue::Array(a) => {
@@ -1151,11 +1241,18 @@ fn write_at(cur: &mut JsonValue, segments: &[String], value: JsonValue) -> Resul
                     JsonValue::Object(Map::new())
                 });
                 let last = a.len() - 1;
-                return write_at(&mut a[last], rest, value);
+                return write_at(&mut a[last], rest, value, max_index);
             }
             let idx = head
                 .parse::<usize>()
                 .map_err(|_| format!("array segment {head:?} is not numeric"))?;
+            // F3 (DoS): defense-in-depth. The pad loop below grows the array up
+            // to `idx`, so a large attacker-controlled index would force a huge
+            // allocation. Reject indices above the safety cap before padding or
+            // writing.
+            if idx > max_index {
+                return Err(format!("array index {idx} exceeds max {max_index}"));
+            }
             while a.len() <= idx {
                 a.push(JsonValue::Null);
             }
@@ -1170,7 +1267,7 @@ fn write_at(cur: &mut JsonValue, segments: &[String], value: JsonValue) -> Resul
                         JsonValue::Object(Map::new())
                     };
                 }
-                write_at(&mut a[idx], rest, value)
+                write_at(&mut a[idx], rest, value, max_index)
             }
         }
         _ => Err(format!(
@@ -1324,9 +1421,120 @@ mod tests {
     #[test]
     fn pointer_write_creates_arrays_with_padding() {
         let mut out = JsonValue::Null;
-        write_pointer(&mut out, "/items/3/name", json!("x")).unwrap();
+        write_pointer(&mut out, "/items/3/name", json!("x"), MAX_ARRAY_INDEX).unwrap();
         assert_eq!(out["items"][0], JsonValue::Null);
         assert_eq!(out["items"][3]["name"], json!("x"));
+    }
+
+    #[test]
+    fn pointer_write_rejects_over_cap_array_index() {
+        // F3 runtime guard: a write to an index above the cap must error
+        // rather than padding the array with that many nulls.
+        let mut out = JsonValue::Null;
+        let err = write_pointer(&mut out, "/x/5", json!("v"), 4).unwrap_err();
+        assert!(err.contains("exceeds max"), "unexpected error: {err}");
+        // Nested over-cap index is also rejected.
+        let mut out2 = JsonValue::Null;
+        let err2 = write_pointer(&mut out2, "/a/0/b/9", json!("v"), 4).unwrap_err();
+        assert!(err2.contains("exceeds max"), "unexpected error: {err2}");
+    }
+
+    #[test]
+    fn compile_rejects_target_array_index_above_max_list_len() {
+        // F3 compile-time fix: an array index far above max_list_len must be
+        // rejected at compile time, before any allocation at evaluation.
+        let limits = SecurityLimits {
+            max_list_len: 100,
+            ..Default::default()
+        };
+        let doc = r#"
+version: "0.2"
+property_mappings:
+  - source: /a
+    target: /x/100000000
+"#;
+        let err = compile_publicschema_mapping(
+            doc,
+            &limits,
+            CodeSystemRegistry::default(),
+            None,
+            PublicSchemaCompileOptions::default(),
+        )
+        .unwrap_err();
+        let msg = match err {
+            CompileError::Mapping(m) => m,
+            other => panic!("expected Mapping error, got {other:?}"),
+        };
+        assert!(msg.contains("exceeds maximum"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn compile_allows_in_range_array_index() {
+        // An index within max_list_len must still compile.
+        let limits = SecurityLimits::default();
+        let doc = r#"
+version: "0.2"
+property_mappings:
+  - source: /a
+    target: /x/3
+"#;
+        compile_publicschema_mapping(
+            doc,
+            &limits,
+            CodeSystemRegistry::default(),
+            None,
+            PublicSchemaCompileOptions::default(),
+        )
+        .expect("in-range index should compile");
+    }
+
+    #[test]
+    fn compile_rejects_oversized_document() {
+        // F10: a document larger than MAX_MAPPING_DOCUMENT_BYTES is rejected
+        // with a compile error before parsing.
+        let limits = SecurityLimits::default();
+        let mut doc = String::from("version: \"0.2\"\nproperty_mappings: []\n");
+        doc.push_str(&"#".repeat(MAX_MAPPING_DOCUMENT_BYTES + 1));
+        let err = compile_publicschema_mapping(
+            &doc,
+            &limits,
+            CodeSystemRegistry::default(),
+            None,
+            PublicSchemaCompileOptions::default(),
+        )
+        .unwrap_err();
+        let msg = match err {
+            CompileError::Mapping(m) => m,
+            other => panic!("expected Mapping error, got {other:?}"),
+        };
+        assert!(msg.contains("exceeds maximum"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn log_is_capped_at_max_entries() {
+        // F9: push_log must stop retaining full entries once the cap is hit,
+        // appending exactly one truncation marker.
+        let mut log: Vec<PublicSchemaRuleLogEntry> = Vec::new();
+        for i in 0..(MAX_LOG_ENTRIES + 50) {
+            push_log(
+                &mut log,
+                LogFields {
+                    index: i,
+                    rule_id: None,
+                    source_path: "/a",
+                    target_path: "/b",
+                    status: "ok",
+                    expression: None,
+                    resolved_input: None,
+                    resolved_output: None,
+                    quality: None,
+                    issues: Vec::new(),
+                    privacy: PrivacyMode::Debug,
+                },
+            );
+        }
+        assert_eq!(log.len(), MAX_LOG_ENTRIES + 1);
+        assert_eq!(log.last().unwrap().status, "log_truncated");
     }
 
     #[test]
