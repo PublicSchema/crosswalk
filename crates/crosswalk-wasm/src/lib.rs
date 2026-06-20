@@ -31,7 +31,10 @@ impl WasmMappingRuntime {
     pub fn set_limits_json(&mut self, json: &str) -> String {
         match serde_json::from_str::<SecurityLimits>(json) {
             Ok(l) => {
-                self.inner.limits = l;
+                // Clamp caller-supplied limits to the secure `[floor, ceiling]` ranges so a
+                // malicious caller (e.g. via XSS / a hostile plugin) cannot WIDEN limits beyond
+                // their defaults to defeat the DoS protections, nor zero them out.
+                self.inner.limits = l.clamped();
                 json!({ "ok": true }).to_string()
             }
             Err(e) => json!({ "error": e.to_string() }).to_string(),
@@ -274,6 +277,20 @@ fn parse_privacy_mode(privacy: &str) -> PrivacyMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_limits_json_clamps_overwide_values() {
+        let mut rt = WasmMappingRuntime::new();
+        // Caller attempts to widen output/list limits far beyond the secure defaults.
+        let out = rt.set_limits_json(
+            r#"{"max_expression_bytes":262144,"max_output_json_bytes":18446744073709551615,"max_list_len":18446744073709551615,"max_string_bytes":1048576,"max_eval_steps":1000000}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], true);
+        // Clamped down to the defaults (the hard ceilings).
+        assert_eq!(rt.inner.limits.max_output_json_bytes, 16 * 1024 * 1024);
+        assert_eq!(rt.inner.limits.max_list_len, 100_000);
+    }
 
     #[test]
     fn evaluate_expression_json_ok() {

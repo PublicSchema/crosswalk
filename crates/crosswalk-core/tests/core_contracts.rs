@@ -373,7 +373,7 @@ fn output_records_size_limit_enforced() {
     let mut rt = MappingRuntime::new(RuntimeOptions::default());
     rt.limits = SecurityLimits {
         max_expression_bytes: 256 * 1024,
-        max_output_json_bytes: 40,
+        max_output_json_bytes: 80,
         max_list_len: 100_000,
         max_string_bytes: 1024 * 1024,
         max_eval_steps: 1_000_000,
@@ -402,6 +402,41 @@ records:
         out.errors
     );
     assert!(out.records.is_empty() || out.records.get("r").map(|v| v.is_empty()).unwrap_or(true));
+}
+
+#[test]
+fn mapping_evaluation_rejects_oversized_cel_input() {
+    let mut rt = MappingRuntime::new(RuntimeOptions::default());
+    rt.limits = SecurityLimits {
+        max_expression_bytes: 256 * 1024,
+        max_output_json_bytes: 64,
+        max_list_len: 100_000,
+        max_string_bytes: 1024 * 1024,
+        max_eval_steps: 1_000_000,
+    };
+    let yaml = r#"
+version: "0.1"
+name: t
+records:
+  r:
+    fields:
+      blob: source.blob
+"#;
+    let m = rt.compile_mapping(yaml).unwrap();
+    let out = rt.evaluate(
+        &m,
+        EvaluationInput {
+            source: json!({ "blob": "x".repeat(4096) }),
+            context: json!({}),
+        },
+    );
+    assert!(
+        out.errors
+            .iter()
+            .any(|e| e.message.contains("input exceeds max")),
+        "expected input limit error, got {:?}",
+        out.errors
+    );
 }
 
 #[test]

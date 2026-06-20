@@ -69,9 +69,11 @@ fn runtime_options_from_any(val: &Bound<'_, PyAny>) -> PyResult<RuntimeOptions> 
 fn security_limits_from_any(val: &Bound<'_, PyAny>) -> PyResult<SecurityLimits> {
     if let Ok(s) = val.extract::<&str>() {
         return serde_json::from_str(s.trim())
+            .map(SecurityLimits::clamped)
             .map_err(|e| PyTypeError::new_err(format!("limits: invalid JSON string ({e})")));
     }
     depythonize(val)
+        .map(SecurityLimits::clamped)
         .map_err(|e| PyTypeError::new_err(format!("limits: expected dict or JSON string ({e})")))
 }
 
@@ -243,7 +245,7 @@ impl PyMappingRuntime {
     fn set_limits_json(&mut self, json: &str) -> PyResult<()> {
         let lim: SecurityLimits = serde_json::from_str(json)
             .map_err(|e| PyTypeError::new_err(format!("limits: invalid JSON string ({e})")))?;
-        self.inner.limits = lim;
+        self.inner.limits = lim.clamped();
         Ok(())
     }
 

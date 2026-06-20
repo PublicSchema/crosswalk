@@ -77,11 +77,64 @@ pub fn evaluate_cel_expression_with_input(
     limits: &SecurityLimits,
     codes: Arc<crosswalk_functions::codes::CodeSystemRegistry>,
 ) -> Result<JsonValue, StandaloneEvalError> {
+    // F1 (CPU-DoS): `cel` 0.13 has no per-step/fuel budget, so a crafted comprehension
+    // (`.map`/`.filter`/`.exists`) over a large input list can run unbudgeted. Comprehension
+    // iteration counts are bounded by input list sizes, so we bound the input itself here, before
+    // compiling/executing, using `max_output_json_bytes` as a symmetric input ceiling. This is a
+    // portable (incl. WASM) partial CPU-DoS bound that needs no threads/watchdog/timeout.
+    check_input_size(&input.root_bindings, limits)?;
     let cel = compile_expr(expr, limits, "expression".into())?;
-    evaluate_compiled_expression_with_input(&cel, input, codes)
+    evaluate_compiled_expression_with_prechecked_input(&cel, input, codes)
+}
+
+/// Reject input root bindings whose serialized JSON exceeds the symmetric input cap
+/// (`limits.max_output_json_bytes`). See F1 above.
+fn check_input_size(
+    root_bindings: &BTreeMap<String, JsonValue>,
+    limits: &SecurityLimits,
+) -> Result<(), StandaloneEvalError> {
+    let bytes = serde_json::to_string(root_bindings)
+        .map(|s| s.len())
+        .map_err(|err| StandaloneEvalError::Evaluate {
+            message: format!("failed to measure input size: {err}"),
+            expression: String::new(),
+        })?;
+    if bytes > limits.max_output_json_bytes {
+        return Err(StandaloneEvalError::Evaluate {
+            message: format!(
+                "input exceeds max {} bytes (serialized root bindings are {} bytes)",
+                limits.max_output_json_bytes, bytes
+            ),
+            expression: String::new(),
+        });
+    }
+    Ok(())
 }
 
 pub fn evaluate_compiled_expression_with_input(
+    cel: &CompiledCel,
+    input: StandaloneExpressionInput,
+    codes: Arc<crosswalk_functions::codes::CodeSystemRegistry>,
+) -> Result<JsonValue, StandaloneEvalError> {
+    evaluate_compiled_expression_with_input_and_limits(
+        cel,
+        input,
+        &SecurityLimits::default(),
+        codes,
+    )
+}
+
+pub fn evaluate_compiled_expression_with_input_and_limits(
+    cel: &CompiledCel,
+    input: StandaloneExpressionInput,
+    limits: &SecurityLimits,
+    codes: Arc<crosswalk_functions::codes::CodeSystemRegistry>,
+) -> Result<JsonValue, StandaloneEvalError> {
+    check_input_size(&input.root_bindings, limits)?;
+    evaluate_compiled_expression_with_prechecked_input(cel, input, codes)
+}
+
+fn evaluate_compiled_expression_with_prechecked_input(
     cel: &CompiledCel,
     input: StandaloneExpressionInput,
     codes: Arc<crosswalk_functions::codes::CodeSystemRegistry>,
@@ -158,6 +211,10 @@ pub fn preview_cel_expression_with_input(
     let author = expr.to_string();
 
     if let Err(issue) = validate_root_bindings_for_preview(&input.root_bindings, &author) {
+        return ExpressionPreviewResult::from_parts(author, None, vec![issue]);
+    }
+
+    if let Err(issue) = validate_input_size_for_preview(&input.root_bindings, limits, &author) {
         return ExpressionPreviewResult::from_parts(author, None, vec![issue]);
     }
 
@@ -286,6 +343,23 @@ fn validate_root_bindings_for_preview(
         }
     }
     Ok(())
+}
+
+fn validate_input_size_for_preview(
+    root_bindings: &BTreeMap<String, JsonValue>,
+    limits: &SecurityLimits,
+    expression: &str,
+) -> Result<(), ExpressionIssue> {
+    check_input_size(root_bindings, limits).map_err(|err| ExpressionIssue {
+        phase: ExpressionPhase::Limits,
+        severity: crate::errors::ErrorSeverity::Error,
+        code: ErrorCode::InternalError,
+        message: err.to_string(),
+        line: None,
+        column: None,
+        expression: expression.to_string(),
+        source_path: None,
+    })
 }
 
 pub fn validate_root_binding_name(name: &str) -> Result<(), String> {

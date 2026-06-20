@@ -5,7 +5,7 @@ use crate::compiler::compile_mapping_yaml;
 use crate::errors::{CompileError, ExpressionPreviewResult, StandaloneEvalError};
 use crate::eval_ctx::{clear_eval_ctx, clear_warnings, set_eval_ctx, take_warnings};
 use crate::evaluator::{
-    evaluate_cel_expression, evaluate_cel_expression_with_input, evaluate_mapping,
+    evaluate_cel_expression, evaluate_cel_expression_with_input, evaluate_mapping_with_limits,
     StandaloneExpressionInput,
 };
 use crate::publicschema::{
@@ -157,7 +157,7 @@ impl MappingRuntime {
         }
         set_eval_ctx(ctx.clone());
         let _budget = BudgetGuard::install(Arc::new(self.limits.clone()));
-        let mut out = evaluate_mapping(mapping, input.source, ctx);
+        let mut out = evaluate_mapping_with_limits(mapping, input.source, ctx, &self.limits);
         drop(_budget);
         clear_eval_ctx();
         if let Err(msg) = self.limits.check_output_records(&out.records) {
