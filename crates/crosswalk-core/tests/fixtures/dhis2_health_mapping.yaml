@@ -1,0 +1,85 @@
+# CEL collection-macro regression mapping — mirrors dhis2-health-lookup.js logic.
+# Constants inlined since CEL mappings don't have a const block:
+#   CHILD_PROGRAM          = "IpHINAT79UW"
+#   MATERNAL_PNC_PROGRAM   = "uy2gU8kT1jF"
+#   TB_PROGRAM             = "ur1Edk5Oe2n"
+#   CHILD_BIRTH_STAGE      = "A03MvHHogjR"
+#   BABY_POSTNATAL_STAGE   = "ZzYYXq4fJie"
+#   FIRST_NAME_ATTRIBUTE   = "w75KJ2mc4zz"
+#   LAST_NAME_ATTRIBUTE    = "zDhUuAYrxNC"
+
+version: "0.1"
+name: dhis2_health_cel_regression
+records:
+  patient:
+    fields:
+      # ------------------------------------------------------------------
+      # 1. filter([0]).value — attribute lookup by id
+      # ------------------------------------------------------------------
+      first_name: >-
+        source.attributes.filter(a, a.attribute == 'w75KJ2mc4zz')[0].value
+
+      last_name: >-
+        source.attributes.filter(a, a.attribute == 'zDhUuAYrxNC')[0].value
+
+      # ------------------------------------------------------------------
+      # 2. exists with compound && predicate — active programme booleans
+      # ------------------------------------------------------------------
+      child_program_active: >-
+        source.enrollments.exists(e, e.program == 'IpHINAT79UW' && e.status == 'ACTIVE')
+
+      maternal_pnc_active: >-
+        source.enrollments.exists(e, e.program == 'uy2gU8kT1jF' && e.status == 'ACTIVE')
+
+      tb_program_active: >-
+        source.enrollments.exists(e, e.program == 'ur1Edk5Oe2n' && e.status == 'ACTIVE')
+
+      # ------------------------------------------------------------------
+      # 3. filter([0]).status — programme status string (ternary guard)
+      # ------------------------------------------------------------------
+      child_program_status: >-
+        source.enrollments.exists(e, e.program == 'IpHINAT79UW')
+          ? source.enrollments.filter(e, e.program == 'IpHINAT79UW')[0].status
+          : null
+
+      tb_program_status: >-
+        source.enrollments.exists(e, e.program == 'ur1Edk5Oe2n')
+          ? source.enrollments.filter(e, e.program == 'ur1Edk5Oe2n')[0].status
+          : null
+
+      # ------------------------------------------------------------------
+      # 4. count of matching enrollments — list_length() helper.
+      # (size(...) over a comprehension and the .size() method work equally.)
+      # ------------------------------------------------------------------
+      active_enrollment_count: >-
+        list_length(source.enrollments.filter(e, e.status == 'ACTIVE'))
+
+      # ------------------------------------------------------------------
+      # 5. nested exists over events with compound predicate
+      #    "was any child-health-visit event recorded?"
+      # ------------------------------------------------------------------
+      child_health_visit_recorded: >-
+        source.enrollments.exists(e,
+          e.program == 'IpHINAT79UW' && e.events.exists(ev,
+            ev.status == 'COMPLETED' && (ev.programStage == 'A03MvHHogjR' || ev.programStage == 'ZzYYXq4fJie')))
+
+      # ------------------------------------------------------------------
+      # 6. flatMap-equivalent: filter → map → list_flatten → filter → list_length
+      #    "how many COMPLETED child-programme events exist?"
+      #
+      #    JS: enrollments.filter(p==CHILD).flatMap(e => e.events).filter(s==COMPLETED).length
+      #    CEL: list_length(list_flatten(
+      #           source.enrollments.filter(e, e.program == 'IpHINAT79UW').map(e, e.events)
+      #         ).filter(ev, ev.status == 'COMPLETED'))
+      #
+      #    list_length() (crosswalk helper) is used for the count; size(...) and
+      #    .size() over a comprehension result work equally.
+      # ------------------------------------------------------------------
+      child_health_visit_count: >-
+        list_length(list_flatten(source.enrollments.filter(e, e.program == 'IpHINAT79UW').map(e, e.events)).filter(ev, ev.status == 'COMPLETED'))
+
+      # ------------------------------------------------------------------
+      # 7. string concat — reconciliation reference
+      # ------------------------------------------------------------------
+      reconciliation_ref: >-
+        'dhis2:tracked-entity:' + source.trackedEntity

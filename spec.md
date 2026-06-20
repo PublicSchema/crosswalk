@@ -930,6 +930,48 @@ Example:
 list.to_map(source.members, "id")
 ```
 
+### Native CEL collection macros
+
+Beyond the `list.*` helpers above, the standard CEL comprehension macros are
+available as **methods on any list expression** and may be used directly in
+mapping formulas:
+
+| Macro | Meaning |
+|-------|---------|
+| `xs.all(x, pred)` | `true` if `pred` holds for every element (vacuously `true` for an empty list) |
+| `xs.exists(x, pred)` | `true` if `pred` holds for at least one element |
+| `xs.exists_one(x, pred)` | `true` if `pred` holds for exactly one element |
+| `xs.filter(x, pred)` | the sublist of elements for which `pred` holds |
+| `xs.map(x, expr)` | the list of `expr` evaluated for each element |
+
+`size(xs)` and index access (`xs[0]`) are likewise supported. Macros may be
+nested and combined with helpers — for example
+`source.attributes.filter(a, a.id == 'x')[0].value`, or, to flatten a list of
+lists before counting, `size(list_flatten(source.groups.map(g, g.items)))`.
+
+These macros are method calls on a *list-valued expression* (the receiver `xs`
+is any expression that evaluates to a list); this is distinct from the `list.*`
+helper namespace documented above, whose entries are rewritten to `list_*`
+function calls at compile time.
+
+Per CEL semantics the per-element predicate/transform body is evaluated in a
+**strict** context: a missing field referenced inside a macro body raises an
+error rather than being treated as absent, even when the whole expression is
+wrapped in a missing-aware helper such as `coalesce(...)`. For the same reason,
+guard a macro whose *receiver* may be absent with an explicit
+`present(source.items) ? source.items.filter(...) : []` rather than relying on
+`coalesce(...)` to rescue it.
+
+Two practical notes when applying macros to JSON-sourced data:
+
+- **Filter then transform:** chain `xs.filter(x, pred).map(x, expr)` rather than
+  the 3-argument `map` form, which is not reliably supported.
+- **Integer types:** non-negative JSON integers decode as CEL *unsigned* values,
+  which do not directly `==`, or do arithmetic, with signed integer literals
+  (`3`, `10`). Compare with an unsigned literal (`x == 3u`) or wrap the value in
+  `int(...)` (`int(x) * 2`). String comparisons (the common case for DHIS2 and
+  similar sources) are unaffected.
+
 ---
 
 ## 7.8 Maps and objects
