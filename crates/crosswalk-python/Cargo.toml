@@ -19,7 +19,7 @@ name = "crosswalk"
 crate-type = ["cdylib"]
 
 [dependencies]
-crosswalk-core = { version = "0.1.1", path = "../crosswalk-core" }
+crosswalk-core = { version = "0.2.0", path = "../crosswalk-core" }
 pyo3 = { version = "0.22", features = ["extension-module"] }
 pythonize = "0.22"
 serde_json = "1"

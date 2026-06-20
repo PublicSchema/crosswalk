@@ -8,7 +8,9 @@ Use Crosswalk when you need:
 
 - A repeatable JSON-to-JSON transform runtime.
 - CEL expressions with Crosswalk helper functions for text, dates, IDs, code
-  systems, redaction, phone numbers, and JSON utilities.
+  systems, redaction, phone numbers, and JSON utilities; mapping expressions
+  also support standard CEL collection macros (`filter`, `map`, `exists`,
+  `exists_one`, `all`) on lists — see §7.7 in [`spec.md`](./spec.md).
 - Compile-once, evaluate-many mapping workflows.
 - The same mapping behavior from Rust, Python, browser, or TypeScript hosts.
 

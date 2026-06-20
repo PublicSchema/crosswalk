@@ -208,7 +208,7 @@ checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crosswalk-cel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "cel",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "crosswalk-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "base64",
  "cel",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "crosswalk-functions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "crosswalk-functions-cel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "cel",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "crosswalk-publicschema"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crosswalk-cel",
  "crosswalk-functions",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "crosswalk-python"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "crosswalk-core",
  "pyo3",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "crosswalk-wasm"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "crosswalk-core",
  "serde",
