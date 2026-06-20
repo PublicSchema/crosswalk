@@ -26,7 +26,8 @@ pub use errors::{
 };
 pub use evaluator::{
     evaluate_cel_expression, evaluate_cel_expression_with_input,
-    evaluate_compiled_expression_with_input, preview_cel_expression,
-    preview_cel_expression_with_input, validate_root_binding_name, StandaloneExpressionInput,
+    evaluate_compiled_expression_with_input, evaluate_compiled_expression_with_input_and_limits,
+    preview_cel_expression, preview_cel_expression_with_input, validate_root_binding_name,
+    StandaloneExpressionInput,
 };
 pub use security::SecurityLimits;

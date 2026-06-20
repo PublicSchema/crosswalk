@@ -8,7 +8,7 @@
 
 use crosswalk_cel::SecurityLimits;
 use crosswalk_cel::StandaloneExpressionInput;
-use crosswalk_cel::{compile_expr, evaluate_compiled_expression_with_input};
+use crosswalk_cel::{compile_expr, evaluate_compiled_expression_with_input_and_limits};
 use crosswalk_cel::{CompileError, CompiledCel, ErrorMode};
 use crosswalk_cel::{ErrorCode, ErrorSeverity, ExpressionPreviewResult, MappingError};
 use crosswalk_functions::codes::{CodeEntry, CodeSystemDocument, CodeSystemRegistry};
@@ -126,6 +126,7 @@ pub struct CompiledPublicSchemaMapping {
     pub meta: PublicSchemaCompileMeta,
     rules: Vec<CompiledPublicSchemaRule>,
     code_systems: Arc<CodeSystemRegistry>,
+    limits: SecurityLimits,
 }
 
 #[derive(Debug)]
@@ -285,12 +286,8 @@ pub fn compile_publicschema_mapping(
     let mut expression_count = 0usize;
     let mut rules = Vec::with_capacity(doc.property_mappings.len());
     for (idx, pm) in doc.property_mappings.iter().enumerate() {
-        validate_pointer(
-            &pm.source,
-            format!("property_mappings[{idx}].source"),
-            limits.max_list_len,
-        )?;
-        validate_pointer(
+        validate_pointer(&pm.source, format!("property_mappings[{idx}].source"))?;
+        validate_target_pointer(
             &pm.target,
             format!("property_mappings[{idx}].target"),
             limits.max_list_len,
@@ -356,6 +353,7 @@ pub fn compile_publicschema_mapping(
         meta,
         rules,
         code_systems: codes,
+        limits: limits.clone(),
     })
 }
 
@@ -841,7 +839,7 @@ fn code_entry_from_yaml(
     })
 }
 
-fn validate_pointer(pointer: &str, path: String, max_index: usize) -> Result<(), CompileError> {
+fn validate_pointer(pointer: &str, path: String) -> Result<(), CompileError> {
     if pointer.is_empty() {
         return Ok(());
     }
@@ -850,9 +848,19 @@ fn validate_pointer(pointer: &str, path: String, max_index: usize) -> Result<(),
             "{path} must be an RFC 6901 JSON Pointer"
         )));
     }
+    Ok(())
+}
+
+fn validate_target_pointer(
+    pointer: &str,
+    path: String,
+    max_index: usize,
+) -> Result<(), CompileError> {
+    validate_pointer(pointer, path.clone())?;
     // F3 (DoS): reject numeric array-index segments above `max_index` so a
-    // mapping like `/x/100000000` cannot force a huge null-padding allocation
-    // in `write_at` at evaluation time.
+    // target like `/x/100000000` cannot force a huge null-padding allocation
+    // in `write_at` at evaluation time. Source pointers are not capped here:
+    // numeric source segments can be ordinary object keys and never allocate.
     if let Some(segments) = pointer_segments(pointer) {
         for seg in &segments {
             if let Ok(idx) = seg.parse::<usize>() {
@@ -993,9 +1001,10 @@ fn eval_rule_expression(
         }
     }
 
-    evaluate_compiled_expression_with_input(
+    evaluate_compiled_expression_with_input_and_limits(
         cel,
         StandaloneExpressionInput::new(root_bindings),
+        &mapping.limits,
         Arc::clone(&mapping.code_systems),
     )
     .map_err(|err| err.to_string())
@@ -1486,6 +1495,82 @@ property_mappings:
             PublicSchemaCompileOptions::default(),
         )
         .expect("in-range index should compile");
+    }
+
+    #[test]
+    fn compile_allows_large_numeric_source_object_key() {
+        let limits = SecurityLimits {
+            max_list_len: 100,
+            ..Default::default()
+        };
+        let doc = r#"
+version: "0.2"
+property_mappings:
+  - source: /answers/100000001
+    target: /out
+"#;
+        let compiled = compile_publicschema_mapping(
+            doc,
+            &limits,
+            CodeSystemRegistry::default(),
+            None,
+            PublicSchemaCompileOptions::default(),
+        )
+        .expect("large numeric source object key should compile");
+
+        let out = evaluate_publicschema_mapping(
+            &compiled,
+            PublicSchemaEvaluationInput {
+                source: json!({ "answers": { "100000001": "ok" } }),
+                context: json!({}),
+                options: PublicSchemaEvaluateOptions::default(),
+            },
+        );
+
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.output["out"], json!("ok"));
+    }
+
+    #[test]
+    fn formula_evaluation_uses_compile_time_input_limit() {
+        let limits = SecurityLimits {
+            max_output_json_bytes: 64,
+            ..Default::default()
+        };
+        let doc = r#"
+version: "0.2"
+property_mappings:
+  - source: /blob
+    target: /out
+    formula:
+      to_target:
+        expression: source + ""
+"#;
+        let compiled = compile_publicschema_mapping(
+            doc,
+            &limits,
+            CodeSystemRegistry::default(),
+            None,
+            PublicSchemaCompileOptions::default(),
+        )
+        .expect("mapping should compile");
+
+        let out = evaluate_publicschema_mapping(
+            &compiled,
+            PublicSchemaEvaluationInput {
+                source: json!({ "blob": "x".repeat(4096) }),
+                context: json!({}),
+                options: PublicSchemaEvaluateOptions::default(),
+            },
+        );
+
+        assert!(
+            out.errors
+                .iter()
+                .any(|err| err.message.contains("input exceeds max")),
+            "expected input limit error, got {:?}",
+            out.errors
+        );
     }
 
     #[test]

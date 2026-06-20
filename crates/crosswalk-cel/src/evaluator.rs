@@ -84,7 +84,7 @@ pub fn evaluate_cel_expression_with_input(
     // portable (incl. WASM) partial CPU-DoS bound that needs no threads/watchdog/timeout.
     check_input_size(&input.root_bindings, limits)?;
     let cel = compile_expr(expr, limits, "expression".into())?;
-    evaluate_compiled_expression_with_input(&cel, input, codes)
+    evaluate_compiled_expression_with_prechecked_input(&cel, input, codes)
 }
 
 /// Reject input root bindings whose serialized JSON exceeds the symmetric input cap
@@ -112,6 +112,29 @@ fn check_input_size(
 }
 
 pub fn evaluate_compiled_expression_with_input(
+    cel: &CompiledCel,
+    input: StandaloneExpressionInput,
+    codes: Arc<crosswalk_functions::codes::CodeSystemRegistry>,
+) -> Result<JsonValue, StandaloneEvalError> {
+    evaluate_compiled_expression_with_input_and_limits(
+        cel,
+        input,
+        &SecurityLimits::default(),
+        codes,
+    )
+}
+
+pub fn evaluate_compiled_expression_with_input_and_limits(
+    cel: &CompiledCel,
+    input: StandaloneExpressionInput,
+    limits: &SecurityLimits,
+    codes: Arc<crosswalk_functions::codes::CodeSystemRegistry>,
+) -> Result<JsonValue, StandaloneEvalError> {
+    check_input_size(&input.root_bindings, limits)?;
+    evaluate_compiled_expression_with_prechecked_input(cel, input, codes)
+}
+
+fn evaluate_compiled_expression_with_prechecked_input(
     cel: &CompiledCel,
     input: StandaloneExpressionInput,
     codes: Arc<crosswalk_functions::codes::CodeSystemRegistry>,
@@ -188,6 +211,10 @@ pub fn preview_cel_expression_with_input(
     let author = expr.to_string();
 
     if let Err(issue) = validate_root_bindings_for_preview(&input.root_bindings, &author) {
+        return ExpressionPreviewResult::from_parts(author, None, vec![issue]);
+    }
+
+    if let Err(issue) = validate_input_size_for_preview(&input.root_bindings, limits, &author) {
         return ExpressionPreviewResult::from_parts(author, None, vec![issue]);
     }
 
@@ -316,6 +343,23 @@ fn validate_root_bindings_for_preview(
         }
     }
     Ok(())
+}
+
+fn validate_input_size_for_preview(
+    root_bindings: &BTreeMap<String, JsonValue>,
+    limits: &SecurityLimits,
+    expression: &str,
+) -> Result<(), ExpressionIssue> {
+    check_input_size(root_bindings, limits).map_err(|err| ExpressionIssue {
+        phase: ExpressionPhase::Limits,
+        severity: crate::errors::ErrorSeverity::Error,
+        code: ErrorCode::InternalError,
+        message: err.to_string(),
+        line: None,
+        column: None,
+        expression: expression.to_string(),
+        source_path: None,
+    })
 }
 
 pub fn validate_root_binding_name(name: &str) -> Result<(), String> {

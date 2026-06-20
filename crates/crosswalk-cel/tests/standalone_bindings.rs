@@ -1,7 +1,8 @@
 use crosswalk_cel::{
     compile_expr, evaluate_cel_expression, evaluate_cel_expression_with_input,
-    evaluate_compiled_expression_with_input, preview_cel_expression_with_input, SecurityLimits,
-    StandaloneEvalError, StandaloneExpressionInput,
+    evaluate_compiled_expression_with_input, evaluate_compiled_expression_with_input_and_limits,
+    preview_cel_expression_with_input, ExpressionPhase, SecurityLimits, StandaloneEvalError,
+    StandaloneExpressionInput,
 };
 use crosswalk_functions::codes::CodeSystemRegistry;
 use serde_json::{json, Value as JsonValue};
@@ -201,4 +202,47 @@ fn small_input_still_evaluates_with_small_cap() {
     )
     .unwrap();
     assert_eq!(result, json!("ok!"));
+}
+
+#[test]
+fn oversized_input_is_rejected_by_compiled_evaluation() {
+    let limits = SecurityLimits {
+        max_output_json_bytes: 64,
+        ..SecurityLimits::default()
+    };
+    let compiled = compile_expr("source.blob", &limits, "test.expression".into()).unwrap();
+    let result = evaluate_compiled_expression_with_input_and_limits(
+        &compiled,
+        input([("source", json!({ "blob": "x".repeat(4096) }))]),
+        &limits,
+        codes(),
+    );
+
+    match result {
+        Err(StandaloneEvalError::Evaluate { message, .. }) => {
+            assert!(
+                message.contains("input exceeds max"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected oversized-input rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn oversized_input_is_rejected_by_preview() {
+    let limits = SecurityLimits {
+        max_output_json_bytes: 64,
+        ..SecurityLimits::default()
+    };
+    let preview = preview_cel_expression_with_input(
+        "source.blob",
+        input([("source", json!({ "blob": "x".repeat(4096) }))]),
+        &limits,
+        codes(),
+    );
+
+    assert!(!preview.is_ok());
+    assert_eq!(preview.issues[0].phase, ExpressionPhase::Limits);
+    assert!(preview.issues[0].message.contains("input exceeds max"));
 }

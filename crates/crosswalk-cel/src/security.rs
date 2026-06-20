@@ -14,10 +14,10 @@ pub struct SecurityLimits {
     /// limits), so this value is not enforced as a true per-step counter. CPU-DoS from
     /// comprehensions (`.map`/`.filter`/`.exists`) over large inputs — whose iteration counts are
     /// bounded by input list sizes — is instead mitigated at the evaluation boundary by an
-    /// input-size cap (see `evaluate_cel_expression` / `evaluate_cel_expression_with_input`, which
-    /// reject root bindings whose serialized JSON exceeds `max_output_json_bytes`) plus the
-    /// existing list/string `BudgetGuard` in the stdlib. A real per-step budget keyed on this field
-    /// awaits upstream `cel` support.
+    /// input-size cap (see `evaluate_cel_expression`, `preview_cel_expression`, and the
+    /// limit-aware compiled evaluator, which reject root bindings whose serialized JSON exceeds
+    /// `max_output_json_bytes`) plus the existing list/string `BudgetGuard` in the stdlib. A real
+    /// per-step budget keyed on this field awaits upstream `cel` support.
     pub max_eval_steps: u64,
 }
 
